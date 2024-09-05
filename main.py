@@ -154,13 +154,6 @@ def validate_security_list(data):
         try:
             ip_address = ipaddress.ip_address(flow_log_record["destinationAddress"])
         except ValueError:
-            sl_unmatched_records.append({
-                "Compartment_ID": data["Compartment_ID"],
-                "Subnet_ID": data['Subnet_ID'],
-                "Security_List_ID": data["Security_List_ID"],
-                "Port": flow_log_record["destinationAddress"],
-                "mismatch_reason": f"Skipping invalid IP address"
-                })
             continue
 
         network = ipaddress.ip_network(subnet.cidr_block, strict=False)
@@ -181,17 +174,10 @@ def validate_security_list(data):
                                     "Compartment_ID": data["Compartment_ID"],
                                     "Subnet_ID": data['Subnet_ID'],
                                     "Security_List_ID": data["Security_List_ID"],
-                                    "Port": destination_port
-                                })
-                            else:
-                                sl_unmatched_records.append({
-                                    "Compartment_ID": data["Compartment_ID"],
-                                    "Subnet_ID": data['Subnet_ID'],
-                                    "Security_List_ID": data["Security_List_ID"],
                                     "Port": destination_port,
-                                    "mismatch_reason": f"TCP destination port {destination_port} is outside the allowed range {port_range.min}-{port_range.max}"
+                                    "Port_range":port_range,
+                                    "reason": "TCP port match"
                                 })
-
                     elif record_protocol == "UDP" and security_list_rule.udp_options:
                         destination_port = int(flow_log_record["destinationPort"])
                         if security_list_rule.udp_options.destination_port_range:
@@ -201,24 +187,28 @@ def validate_security_list(data):
                                     "Compartment_ID": data["Compartment_ID"],
                                     "Subnet_ID": data['Subnet_ID'],
                                     "Security_List_ID": data["Security_List_ID"],
-                                    "Port": destination_port
+                                    "Port": destination_port,
+                                    "Port_range":port_range,
+                                    "reason": "UDP port match"
                                 })
-                            else:
-                                sl_unmatched_records.append({
+                    else:
+                        destination_port = int(flow_log_record["destinationPort"])
+                        sl_matched_records.append({
                                     "Compartment_ID": data["Compartment_ID"],
                                     "Subnet_ID": data['Subnet_ID'],
                                     "Security_List_ID": data["Security_List_ID"],
                                     "Port": destination_port,
-                                    "mismatch_reason": f"UDP destination port {destination_port} is outside the allowed range {port_range.min}-{port_range.max}"
+                                    "Port_range":'NA',
+                                    "reason": "Other port match"
                                 })
-
                 else:
                     sl_unmatched_records.append({
                         "Compartment_ID": data["Compartment_ID"],
                         "Subnet_ID": data['Subnet_ID'],
                         "Security_List_ID": data["Security_List_ID"],
                         "Port": flow_log_record["destinationPort"],
-                        "mismatch_reason": f"Protocol mismatch: {record_protocol} != {Protocol_mapping.get(rule_protocol_number, 'Unknown')}"
+                        "Port_range":'NA',
+                        "mismatch_reason": f"Protocol mismatch: Flow Log Protocol {record_protocol} != Security Rule Protocol number {rule_protocol_number} and {Protocol_mapping.get(rule_protocol_number, 'Unknown')}"
                     })
         else:
             print(f"{ip_address} is not part of CIDR {network}")
@@ -268,16 +258,18 @@ def main(tenancy_id):
                     data.append(val[0])  # Fix the append issue for data
 
     # Convert data to DataFrame and save to Excel
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
     df = pd.DataFrame(data)
-    df.to_excel(r"C:\Security\Blogs\Security_List\Logs\4_raw_subnet_info.xlsx", index=False)
+    df.to_excel(rf"C:\Security\Blogs\Security_List\Logs\raw_subnet_info_{timestamp}.xlsx", index=False)
 
     # Save matched records to Excel
     df_matched = pd.DataFrame(matched_records)
-    df_matched.to_excel(r"C:\Security\Blogs\Security_List\Logs\4_raw_data_matched_records.xlsx", index=False)
+    df_matched.to_excel(rf"C:\Security\Blogs\Security_List\Logs\raw_data_matched_records_{timestamp}.xlsx", index=False)
 
     # Save unmatched records to Excel
     df_unmatched = pd.DataFrame(unmatched_records)
-    df_unmatched.to_excel(r"C:\Security\Blogs\Security_List\Logs\4_raw_data_unmatched_records.xlsx", index=False)
+    df_unmatched.to_excel(rf"C:\Security\Blogs\Security_List\Logs\4_raw_data_unmatched_records_{timestamp}.xlsx", index=False)
 
 if __name__ == "__main__":
     tenancy_id = config['tenancy']  # Get the tenancy ID from the config
