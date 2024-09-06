@@ -68,7 +68,7 @@ def is_internal_ip(ip):
 def get_subnet_cidr(subnet_ocid):
     try:
         subnet_response = virtual_network_client.get_subnet(subnet_ocid)
-        return subnet_response.data.cidr_block
+        return subnet_response.data.cidr_block,subnet_response.data.security_list_ids
     except oci.exceptions.ServiceError as e:
         print(f"Failed to get subnet CIDR: {e}")
         return None
@@ -81,6 +81,23 @@ def is_ip_in_subnet(ip, cidr):
         return ip_obj in subnet
     except ValueError:
         return False
+
+# Fetch security list details for each security list in the subnet
+def get_security_list_details(security_list_ids):
+    security_list_details = []
+    for security_list_id in security_list_ids:
+        try:
+            security_list_response = virtual_network_client.get_security_list(security_list_id)
+            security_list_data = security_list_response.data
+            security_list_details.append({
+                "display_name": security_list_data.display_name,
+                "ingress_security_rules": security_list_data.ingress_security_rules,
+                "egress_security_rules": security_list_data.egress_security_rules
+            })
+        except oci.exceptions.ServiceError as e:
+            print(f"Failed to get security list: {e}")
+            continue
+    return security_list_details
 
 # Parse the JSON data and filter based on action 'ACCEPT'
 def parse_log_file(file_name):
@@ -114,8 +131,13 @@ def parse_log_file(file_name):
                     # Check if sourceAddress or destinationAddress matches subnet CIDR
                     traffic_direction = "N/A"
                     traffic_type = "external traffic"
+                    security_list_details = []
                     if vnic_subnet_ocid != 'N/A':
-                        subnet_cidr = get_subnet_cidr(vnic_subnet_ocid)
+                        subnet_cidr, subnet_security_list = get_subnet_cidr(vnic_subnet_ocid)
+
+                        # Fetch security list details for all security lists in the subnet
+                        if subnet_security_list:
+                            security_list_details = get_security_list_details(subnet_security_list)
 
                         # Determine traffic direction (egress, ingress) based on source or destination match
                         if subnet_cidr:
@@ -128,7 +150,7 @@ def parse_log_file(file_name):
                         if internal_or_external_source == "internal" and internal_or_external_destination == "internal":
                             traffic_type = "internal traffic"
 
-                    # Add extracted data to the result list
+                    # Add extracted data to the result list, including security list details
                     result_list.append({
                         "destinationAddress": destination_address,
                         "destinationPort": destination_port,
@@ -139,12 +161,14 @@ def parse_log_file(file_name):
                         "internal_or_external_destination": internal_or_external_destination,
                         "traffic_direction": traffic_direction,
                         "traffic_type": traffic_type,
+                        "security_lists": security_list_details,  # Contains details of all security lists
                         "oracle": oracle_data
                     })
             except json.JSONDecodeError:
                 print(f"Skipping invalid JSON: {line}")
 
     return result_list
+
 
 # Write the result to JSON and Excel
 def write_output_to_files(output_data, log_file_name):
