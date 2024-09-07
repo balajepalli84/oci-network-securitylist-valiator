@@ -81,6 +81,67 @@ def is_ip_in_subnet(ip, cidr):
         return ip_obj in subnet
     except ValueError:
         return False
+    
+
+def extract_ingress_rule_attributes(rule):
+    return {
+        "description": rule.description,
+        "icmp_options": rule.icmp_options,
+        "is_stateless": rule.is_stateless,
+        "protocol": rule.protocol,
+        "source": rule.source,
+        "source_type": rule.source_type,
+        "tcp_options": {
+            "destination_port_range": {
+                "max": rule.tcp_options.destination_port_range.max if rule.tcp_options and rule.tcp_options.destination_port_range else None,
+                "min": rule.tcp_options.destination_port_range.min if rule.tcp_options and rule.tcp_options.destination_port_range else None
+            },
+            "source_port_range": {
+                "max": rule.tcp_options.source_port_range.max if rule.tcp_options and rule.tcp_options.source_port_range else None,
+                "min": rule.tcp_options.source_port_range.min if rule.tcp_options and rule.tcp_options.source_port_range else None
+            }
+        } if rule.tcp_options else None,
+        "udp_options": {
+            "destination_port_range": {
+                "max": rule.udp_options.destination_port_range.max if rule.udp_options and rule.udp_options.destination_port_range else None,
+                "min": rule.udp_options.destination_port_range.min if rule.udp_options and rule.udp_options.destination_port_range else None
+            },
+            "source_port_range": {
+                "max": rule.udp_options.source_port_range.max if rule.udp_options and rule.udp_options.source_port_range else None,
+                "min": rule.udp_options.source_port_range.min if rule.udp_options and rule.udp_options.source_port_range else None
+            }
+        } if rule.udp_options else None
+    }
+
+def extract_egress_rule_attributes(rule):
+    return {
+        "description": rule.description,
+        "icmp_options": rule.icmp_options,
+        "is_stateless": rule.is_stateless,
+        "protocol": rule.protocol,
+        "destination": rule.destination,
+        "destination_type": rule.destination_type,
+        "tcp_options": {
+            "destination_port_range": {
+                "max": rule.tcp_options.destination_port_range.max if rule.tcp_options and rule.tcp_options.destination_port_range else None,
+                "min": rule.tcp_options.destination_port_range.min if rule.tcp_options and rule.tcp_options.destination_port_range else None
+            },
+            "source_port_range": {
+                "max": rule.tcp_options.source_port_range.max if rule.tcp_options and rule.tcp_options.source_port_range else None,
+                "min": rule.tcp_options.source_port_range.min if rule.tcp_options and rule.tcp_options.source_port_range else None
+            }
+        } if rule.tcp_options else None,
+        "udp_options": {
+            "destination_port_range": {
+                "max": rule.udp_options.destination_port_range.max if rule.udp_options and rule.udp_options.destination_port_range else None,
+                "min": rule.udp_options.destination_port_range.min if rule.udp_options and rule.udp_options.destination_port_range else None
+            },
+            "source_port_range": {
+                "max": rule.udp_options.source_port_range.max if rule.udp_options and rule.udp_options.source_port_range else None,
+                "min": rule.udp_options.source_port_range.min if rule.udp_options and rule.udp_options.source_port_range else None
+            }
+        } if rule.udp_options else None
+    }
 
 # Fetch security list details for each security list in the subnet
 def get_security_list_details(security_list_ids):
@@ -89,10 +150,14 @@ def get_security_list_details(security_list_ids):
         try:
             security_list_response = virtual_network_client.get_security_list(security_list_id)
             security_list_data = security_list_response.data
+
+            ingress_rules = [extract_ingress_rule_attributes(rule) for rule in security_list_data.ingress_security_rules]
+            egress_rules = [extract_egress_rule_attributes(rule) for rule in security_list_data.egress_security_rules]
+
             security_list_details.append({
                 "display_name": security_list_data.display_name,
-                "ingress_security_rules": security_list_data.ingress_security_rules,
-                "egress_security_rules": security_list_data.egress_security_rules
+                "ingress_security_rules": ingress_rules,
+                "egress_security_rules": egress_rules
             })
         except oci.exceptions.ServiceError as e:
             print(f"Failed to get security list: {e}")
@@ -106,7 +171,6 @@ def parse_log_file(file_name):
         for line in f:
             try:
                 log_entry = json.loads(line)
-
                 # Filter based on ingestedtime (last 30 days)
                 ingested_time = log_entry['oracle']['ingestedtime']
                 ingested_datetime = datetime.strptime(ingested_time, "%Y-%m-%dT%H:%M:%S.%fZ")
@@ -199,7 +263,7 @@ def process_flow_logs_in_parallel():
     extracted_data = []
 
     # Use ThreadPoolExecutor for parallel processing of files
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
             executor.submit(process_single_log_file, object_storage_client, namespace, bucket_name, obj.name): obj
             for obj in objects if obj.name.endswith('.log.gz')
@@ -218,6 +282,7 @@ def process_flow_logs_in_parallel():
         excel_output_file = r'C:\\Security\\Blogs\\Security_List\\Logs\\flow_logs_final_output.xlsx'
         df.to_excel(excel_output_file, index=False)
         print(f"Final data has been written to {excel_output_file}")
+
 
 if __name__ == "__main__":
     process_flow_logs_in_parallel()
