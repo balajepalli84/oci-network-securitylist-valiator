@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 config = oci.config.from_file("~/.oci/config")  # Modify if your config file is located elsewhere
 object_storage_client = oci.object_storage.ObjectStorageClient(config)
 virtual_network_client = oci.core.VirtualNetworkClient(config)
-
+subnet_cache = {}
+security_list_cache = {}
 namespace = "ociateam"  # OCI Object Storage namespace
 bucket_name = "Flow-Logs"  # Replace with your bucket name
 
@@ -38,7 +39,7 @@ def list_log_files(client, namespace, bucket_name):
 # Download and extract .log.gz files
 def download_and_extract_file(client, namespace, bucket_name, object_name):
     file_stream = client.get_object(namespace, bucket_name, object_name).data.raw
-    local_file_name = os.path.join('flowlogs',object_name.split('/')[-1])
+    local_file_name = os.path.join(r'C:\Security\Blogs\Security_List\Logs\downloads',object_name.split('/')[-1])
 
     with open(local_file_name, 'wb') as f:
         f.write(file_stream.read())
@@ -64,11 +65,16 @@ def is_internal_ip(ip):
     except ValueError:
         return "invalid"
 
-# Get subnet CIDR from the vnicsubnetocid
+   
 def get_subnet_cidr(subnet_ocid):
+    if subnet_ocid in subnet_cache:
+        return subnet_cache[subnet_ocid]
     try:
         subnet_response = virtual_network_client.get_subnet(subnet_ocid)
-        return subnet_response.data.cidr_block,subnet_response.data.security_list_ids
+        subnet_cidr = subnet_response.data.cidr_block
+        subnet_security_list = subnet_response.data.security_list_ids
+        subnet_cache[subnet_ocid] = (subnet_cidr, subnet_security_list)
+        return subnet_cidr, subnet_security_list
     except oci.exceptions.ServiceError as e:
         print(f"Failed to get subnet CIDR: {e}")
         return None
@@ -143,17 +149,16 @@ def extract_egress_rule_attributes(rule):
         } if rule.udp_options else None
     }
 
-# Fetch security list details for each security list in the subnet
 def get_security_list_details(security_list_ids):
+    if tuple(security_list_ids) in security_list_cache:
+        return security_list_cache[tuple(security_list_ids)]
     security_list_details = []
     for security_list_id in security_list_ids:
         try:
             security_list_response = virtual_network_client.get_security_list(security_list_id)
             security_list_data = security_list_response.data
-
             ingress_rules = [extract_ingress_rule_attributes(rule) for rule in security_list_data.ingress_security_rules]
             egress_rules = [extract_egress_rule_attributes(rule) for rule in security_list_data.egress_security_rules]
-
             security_list_details.append({
                 "display_name": security_list_data.display_name,
                 "ingress_security_rules": ingress_rules,
@@ -162,6 +167,7 @@ def get_security_list_details(security_list_ids):
         except oci.exceptions.ServiceError as e:
             print(f"Failed to get security list: {e}")
             continue
+    security_list_cache[tuple(security_list_ids)] = security_list_details
     return security_list_details
 
 # Parse the JSON data and filter based on action 'ACCEPT'
@@ -237,13 +243,13 @@ def parse_log_file(file_name):
 # Write the result to JSON and Excel
 def write_output_to_files(output_data, log_file_name):
     # Write to JSON file
-    json_output_file = f'C:\\Security\\Blogs\\Security_List\\Logs\\{log_file_name}_output.json'
+    json_output_file = f'C:\\Security\\Blogs\\Security_List\\Logs\\parsed_data\\{log_file_name}_output.json'
     with open(json_output_file, 'w') as json_file:
         json.dump(output_data, json_file, indent=4)
 
     # Write to Excel file
     df = pd.DataFrame(output_data)
-    excel_output_file = r'C:\\Security\\Blogs\\Security_List\\Logs\\flow_logs_output.xlsx'
+    excel_output_file = r'C:\\Security\\Blogs\\Security_List\\Logs\\parsed_data\flow_logs_output.xlsx'
     df.to_excel(excel_output_file, index=False)
 
 # Process a single log file
