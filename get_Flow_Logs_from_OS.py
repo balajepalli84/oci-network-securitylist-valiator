@@ -5,7 +5,6 @@ import json
 import os
 import ipaddress
 from datetime import datetime, timedelta
-import pandas as pd  # To handle writing to Excel
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # OCI configuration
@@ -16,7 +15,7 @@ subnet_cache = {}
 security_list_cache = {}
 namespace = "ociateam"  # OCI Object Storage namespace
 bucket_name = "Flow-Logs"  # Replace with your bucket name
-
+parsed_data_bucket_name="parsed-flow-log-data"
 # Time filter (e.g., last 30 days)
 time_threshold = datetime.utcnow() - timedelta(days=30)
 
@@ -35,6 +34,25 @@ def list_log_files(client, namespace, bucket_name):
         if not obj.name.endswith("/"):  # Exclude folders
             objects.append(obj)
     return objects
+def upload_to_object_storage(file_path, bucket_name, object_name):
+    with open(file_path, 'rb') as f:
+        object_storage_client.put_object(
+            namespace,
+            bucket_name,
+            object_name,
+            f
+        )
+
+# Write parsed data to OCI Object Storage bucket
+def write_output_to_bucket(parsed_data, bucket_name):
+    output_file_name = f"parsed_data_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
+    local_output_path = os.path.join(r'C:\Security\Blogs\Security_List\Logs\downloads', output_file_name)
+
+    with open(local_output_path, 'w') as f:
+        json.dump(parsed_data, f, indent=4)
+
+    upload_to_object_storage(local_output_path, bucket_name, output_file_name)
+    os.remove(local_output_path)
 
 # Download and extract .log.gz files
 def download_and_extract_file(client, namespace, bucket_name, object_name):
@@ -161,6 +179,7 @@ def get_security_list_details(security_list_ids):
             egress_rules = [extract_egress_rule_attributes(rule) for rule in security_list_data.egress_security_rules]
             security_list_details.append({
                 "display_name": security_list_data.display_name,
+                "security_list_ocid": security_list_data.id,
                 "ingress_security_rules": ingress_rules,
                 "egress_security_rules": egress_rules
             })
@@ -240,28 +259,14 @@ def parse_log_file(file_name):
     return result_list
 
 
-# Write the result to JSON and Excel
-def write_output_to_files(output_data, log_file_name):
-    # Write to JSON file
-    json_output_file = f'C:\\Security\\Blogs\\Security_List\\Logs\\parsed_data\\{log_file_name}_output.json'
-    with open(json_output_file, 'w') as json_file:
-        json.dump(output_data, json_file, indent=4)
-
-    # Write to Excel file
-    df = pd.DataFrame(output_data)
-    excel_output_file = r'C:\\Security\\Blogs\\Security_List\\Logs\\parsed_data\flow_logs_output.xlsx'
-    df.to_excel(excel_output_file, index=False)
 
 # Process a single log file
 def process_single_log_file(client, namespace, bucket_name, obj_name):
     log_file_name = obj_name.split('/')[-1].replace('.gz', '')  # Extract log file name
     extracted_file = download_and_extract_file(client, namespace, bucket_name, obj_name)
     parsed_data = parse_log_file(extracted_file)
-    os.remove(extracted_file)  # Clean up extracted file
-
-    # Write output to files (JSON per log file)
-    write_output_to_files(parsed_data, log_file_name)
-    return parsed_data
+    write_output_to_bucket(parsed_data, parsed_data_bucket_name)
+    os.remove(extracted_file)  # Clean up extracted files
 
 # Main function to process logs with parallelism
 def process_flow_logs_in_parallel():
@@ -281,14 +286,6 @@ def process_flow_logs_in_parallel():
                 extracted_data.extend(data)
             except Exception as e:
                 print(f"Error processing file: {e}")
-
-    # Write final output to Excel file
-    if extracted_data:
-        df = pd.DataFrame(extracted_data)
-        excel_output_file = r'C:\\Security\\Blogs\\Security_List\\Logs\\flow_logs_final_output.xlsx'
-        df.to_excel(excel_output_file, index=False)
-        print(f"Final data has been written to {excel_output_file}")
-
 
 if __name__ == "__main__":
     process_flow_logs_in_parallel()
