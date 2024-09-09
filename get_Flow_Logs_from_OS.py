@@ -4,8 +4,11 @@ import gzip
 import json
 import os
 import ipaddress
+import threading
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import tempfile
+import shutil
 
 # OCI configuration
 config = oci.config.from_file("~/.oci/config")  # Modify if your config file is located elsewhere
@@ -15,7 +18,7 @@ subnet_cache = {}
 security_list_cache = {}
 namespace = "ociateam"  # OCI Object Storage namespace
 bucket_name = "Flow-Logs"  # Replace with your bucket name
-parsed_data_bucket_name="parsed-flow-log-data"
+parsed_data_bucket_name = "parsed-flow-log-data"
 # Time filter (e.g., last 30 days)
 time_threshold = datetime.utcnow() - timedelta(days=30)
 
@@ -26,6 +29,9 @@ PRIVATE_IP_RANGES = [
     ipaddress.ip_network("192.168.0.0/16")
 ]
 
+# Lock for thread-safe operations
+lock = threading.Lock()
+
 # List all objects in the bucket and group them by folders
 def list_log_files(client, namespace, bucket_name):
     objects = []
@@ -34,30 +40,11 @@ def list_log_files(client, namespace, bucket_name):
         if not obj.name.endswith("/"):  # Exclude folders
             objects.append(obj)
     return objects
-def upload_to_object_storage(file_path, bucket_name, object_name):
-    with open(file_path, 'rb') as f:
-        object_storage_client.put_object(
-            namespace,
-            bucket_name,
-            object_name,
-            f
-        )
-
-# Write parsed data to OCI Object Storage bucket
-def write_output_to_bucket(parsed_data, bucket_name):
-    output_file_name = f"parsed_data_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
-    local_output_path = os.path.join(r'C:\Security\Blogs\Security_List\Logs\downloads', output_file_name)
-
-    with open(local_output_path, 'w') as f:
-        json.dump(parsed_data, f, indent=4)
-
-    upload_to_object_storage(local_output_path, bucket_name, output_file_name)
-    os.remove(local_output_path)
 
 # Download and extract .log.gz files
 def download_and_extract_file(client, namespace, bucket_name, object_name):
     file_stream = client.get_object(namespace, bucket_name, object_name).data.raw
-    local_file_name = os.path.join(r'C:\Security\Blogs\Security_List\Logs\downloads',object_name.split('/')[-1])
+    local_file_name = os.path.join(r'C:\Security\Blogs\Security_List\Logs\downloads', object_name.split('/')[-1])
 
     with open(local_file_name, 'wb') as f:
         f.write(file_stream.read())
@@ -83,7 +70,6 @@ def is_internal_ip(ip):
     except ValueError:
         return "invalid"
 
-   
 def get_subnet_cidr(subnet_ocid):
     if subnet_ocid in subnet_cache:
         return subnet_cache[subnet_ocid]
@@ -105,7 +91,6 @@ def is_ip_in_subnet(ip, cidr):
         return ip_obj in subnet
     except ValueError:
         return False
-    
 
 def extract_ingress_rule_attributes(rule):
     return {
@@ -198,7 +183,12 @@ def parse_log_file(file_name):
                 log_entry = json.loads(line)
                 # Filter based on ingestedtime (last 30 days)
                 ingested_time = log_entry['oracle']['ingestedtime']
-                ingested_datetime = datetime.strptime(ingested_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+                try:
+                    ingested_datetime = datetime.strptime(ingested_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+                except ValueError:
+                    # If the above fails, try without microseconds
+                    ingested_datetime = datetime.strptime(ingested_time, "%Y-%m-%dT%H:%M:%SZ")
+                
                 if ingested_datetime < time_threshold:
                     continue
 
@@ -258,17 +248,50 @@ def parse_log_file(file_name):
 
     return result_list
 
+# Write the result to JSON and Excel
+def write_output_to_files(output_data, log_file_name):
+    # Use the lock to ensure thread-safe file writing
+    with lock:
+        # Write to JSON file
+        json_output_file = f'C:\\Security\\Blogs\\Security_List\\Logs\\parsed_data\\{log_file_name}_output.json'
+        with open(json_output_file, 'w') as json_file:
+            json.dump(output_data, json_file, indent=4)
 
+def upload_to_object_storage(file_path, bucket_name, object_name):
+    with open(file_path, 'rb') as f:
+        object_storage_client.put_object(
+            namespace,
+            bucket_name,
+            object_name,
+            f
+        )
+
+def write_output_to_bucket(parsed_data, bucket_name, thread_id):
+    output_file_name = f"parsed_data_{thread_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.json"
+    temp_file_path = os.path.join(tempfile.gettempdir(), output_file_name)
+
+    # Write to a temporary file first
+    with open(temp_file_path, 'w') as f:
+        json.dump(parsed_data, f, indent=4)
+
+    # Upload to Object Storage
+    upload_to_object_storage(temp_file_path, bucket_name, output_file_name)
+
+    # Clean up the temporary file
+    os.remove(temp_file_path)
 
 # Process a single log file
-def process_single_log_file(client, namespace, bucket_name, obj_name):
+def process_single_log_file(client, namespace, bucket_name, obj_name, thread_id):
     log_file_name = obj_name.split('/')[-1].replace('.gz', '')  # Extract log file name
     extracted_file = download_and_extract_file(client, namespace, bucket_name, obj_name)
     parsed_data = parse_log_file(extracted_file)
-    write_output_to_bucket(parsed_data, parsed_data_bucket_name)
-    os.remove(extracted_file)  # Clean up extracted files
 
-# Main function to process logs with parallelism
+    # Write each thread's output to a separate file
+    write_output_to_bucket(parsed_data, parsed_data_bucket_name, thread_id)
+
+    os.remove(extracted_file)  # Clean up extracted files
+    return parsed_data
+
 def process_flow_logs_in_parallel():
     objects = list_log_files(object_storage_client, namespace, bucket_name)
     extracted_data = []
@@ -276,8 +299,8 @@ def process_flow_logs_in_parallel():
     # Use ThreadPoolExecutor for parallel processing of files
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {
-            executor.submit(process_single_log_file, object_storage_client, namespace, bucket_name, obj.name): obj
-            for obj in objects if obj.name.endswith('.log.gz')
+            executor.submit(process_single_log_file, object_storage_client, namespace, bucket_name, obj.name, idx): obj
+            for idx, obj in enumerate(objects) if obj.name.endswith('.log.gz')
         }
 
         for future in as_completed(futures):
