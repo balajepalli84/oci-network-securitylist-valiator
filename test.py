@@ -1,70 +1,32 @@
-import oci,sys
+import oci
 
-# Initialize the config and client
-config = oci.config.from_file()  # Assumes a config file at ~/.oci/config
-logging_client = oci.logging.LoggingManagementClient(config)
-identity_client = oci.identity.IdentityClient(config)
+# OCI configuration
+config = oci.config.from_file("~/.oci/config")  # Modify if your config file is located elsewhere
+object_storage_client = oci.object_storage.ObjectStorageClient(config)
+namespace = "ociateam"  # OCI Object Storage namespace
+bucket_name = "parsed-flow-log-data"  # Replace with your bucket name
 
-def list_all_log_groups(compartment_id):
+def delete_all_objects_in_bucket(namespace, bucket_name):
     try:
-        # Create a list to hold all log groups
-        all_log_groups = []
-
-        # List log groups
-        log_group_list = oci.pagination.list_call_get_all_results(
-            logging_client.list_log_groups,
-            compartment_id,
-            is_compartment_id_in_subtree=True
-        ).data       
+        # List all objects in the bucket
+        list_objects_response = object_storage_client.list_objects(namespace, bucket_name)
+        objects = list_objects_response.data.objects
         
-        for log_group in log_group_list:
-            list_logs_response = logging_client.list_logs(
-                log_group_id=log_group.id,
-                log_type="SERVICE").data
-            for list in list_logs_response:
-                print(list)
-                sys.exit()
-                if list.configuration.source.service == 'flowlogstest' or list.configuration.source.service == 'flowlogs':
-                    print(f"subnet has flow logs enabled {list.configuration.source.resource}")
-        return all_log_groups
-    except Exception as e:
-        print(f"Failed to list log groups: {e}")
-        return None
+        if not objects:
+            print("No objects found in the bucket.")
+            return
 
-def list_all_compartments(tenancy_id):
-    try:
-        # Create a list to hold all compartments
-        all_compartments = []
-
-        # List compartments
-        compartment_list = oci.pagination.list_call_get_all_results(
-            identity_client.list_compartments,
-            tenancy_id,
-            compartment_id_in_subtree=True
-        ).data
-
-        for compartment in compartment_list:
-            all_compartments.append(compartment)
-            #print(f"Compartment: {compartment.name} (ID: {compartment.id})")
+        for obj in objects:
+            # Delete each object
+            print(f"Deleting object: {obj.name}")
+            object_storage_client.delete_object(namespace, bucket_name, obj.name)
         
-        return all_compartments
+        print("All objects have been deleted.")
+    except oci.exceptions.ServiceError as e:
+        print(f"Service error: {e}")
     except Exception as e:
-        print(f"Failed to list compartments: {e}")
-        return None
-
-def main():
-    # Replace with your tenancy ID
-    tenancy_id = config["tenancy"]
-
-    # List all compartments in the tenancy
-    compartments = list_all_compartments(tenancy_id)
-
-    if compartments:
-        # Iterate through each compartment and list all log groups
-        for compartment in compartments:
-            #print(f"Listing log groups for compartment: {compartment.name}")
-            list_all_log_groups(compartment.id)
+        print(f"Error: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    delete_all_objects_in_bucket(namespace, bucket_name)
