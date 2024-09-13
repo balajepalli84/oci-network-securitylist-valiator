@@ -1,9 +1,7 @@
-import oci,sys
+import oci
 import pandas as pd
 import datetime
-import json
 import ipaddress
-
 
 # Initialize the config and clients
 config = oci.config.from_file()
@@ -34,7 +32,7 @@ def list_all_vcns(compartment_id):
         print(f"Failed to list VCNs: {e}")
         return []
 
-def list_all_subnets(compartment_id,vcn_id):
+def list_all_subnets(compartment_id, vcn_id):
     try:
         subnet_list = oci.pagination.list_call_get_all_results(
             virtual_network_client.list_subnets,
@@ -61,7 +59,7 @@ def check_flow_logs_enabled(compartment_id, subnet_id):
             ).data
             for log in list_logs_response:
                 if log.configuration.source.service in ['flowlogstest', 'flowlogs'] and log.configuration.source.resource == subnet_id:
-                    return True, log_group.id,log_group.display_name,log.id, log.display_name
+                    return True, log_group.id, log_group.display_name, log.id, log.display_name
         return False, None, None, None, None
     except Exception as e:
         print(f"Failed to check flow logs for subnet {subnet_id}: {e}")
@@ -109,7 +107,6 @@ def query_flow_logs(query_id, limit=500):
 
     return log_results
 
-
 def validate_security_list(data):
     security_list_response = virtual_network_client.get_security_list(data["Security_List_ID"]).data
     query_flow_logs_response = query_flow_logs(f'{data["Compartment_ID"]}/{data["Log_Group_ID"]}/{data["Log_id"]}')
@@ -153,67 +150,101 @@ def validate_security_list(data):
     for flow_log_record in query_flow_logs_response:
         try:
             ip_address = ipaddress.ip_address(flow_log_record["destinationAddress"])
+            source_ip_address = ipaddress.ip_address(flow_log_record["sourceAddress"])
         except ValueError:
             continue
 
         network = ipaddress.ip_network(subnet.cidr_block, strict=False)
-        if ip_address in network and flow_log_record["action"] == 'ACCEPT':
-            for security_list_rule in security_list_response.ingress_security_rules:
-                # Check if the protocol name (from log) matches the protocol number (from rule)
-                record_protocol = flow_log_record["protocolName"].upper()  # Log's protocol (like 'TCP')
-                rule_protocol_number = str(security_list_rule.protocol)  # Security rule protocol number
 
-                if rule_protocol_number in Protocol_mapping and Protocol_mapping[rule_protocol_number] == record_protocol:
-                    # Check TCP Options
-                    if record_protocol == "TCP" and security_list_rule.tcp_options:
-                        destination_port = int(flow_log_record["destinationPort"])
-                        if security_list_rule.tcp_options.destination_port_range:
-                            port_range = security_list_rule.tcp_options.destination_port_range
-                            if port_range.min <= destination_port <= port_range.max:
-                                sl_matched_records.append({
-                                    "Compartment_ID": data["Compartment_ID"],
-                                    "Subnet_ID": data['Subnet_ID'],
-                                    "Security_List_ID": data["Security_List_ID"],
-                                    "Port": destination_port,
-                                    "Port_range":port_range,
-                                    "reason": "TCP port match"
-                                })
-                    elif record_protocol == "UDP" and security_list_rule.udp_options:
-                        destination_port = int(flow_log_record["destinationPort"])
-                        if security_list_rule.udp_options.destination_port_range:
-                            port_range = security_list_rule.udp_options.destination_port_range
-                            if port_range.min <= destination_port <= port_range.max:
-                                sl_matched_records.append({
-                                    "Compartment_ID": data["Compartment_ID"],
-                                    "Subnet_ID": data['Subnet_ID'],
-                                    "Security_List_ID": data["Security_List_ID"],
-                                    "Port": destination_port,
-                                    "Port_range":port_range,
-                                    "reason": "UDP port match"
-                                })
-                    else:
+        if ip_address in network and flow_log_record["action"] == 'ACCEPT':
+            validate_sec_list=False            
+            for security_list_rule in security_list_response.ingress_security_rules:
+                if not validate_sec_list:
+                    try:
+                        rule_network = ipaddress.ip_network(security_list_rule.source, strict=False)
+                    except ValueError:
+                        continue  # Skip if source cannot be converted to network
+
+                    if source_ip_address not in rule_network:
+                        continue  # Skip if source IP is not in the CIDR block
+
+                    # Check if the protocol name (from log) matches the protocol number (from rule)
+                    record_protocol = flow_log_record["protocolName"].upper()  # Log's protocol (like 'TCP')
+                    rule_protocol_number = str(security_list_rule.protocol)  # Security rule protocol number
+
+                    if security_list_rule.protocol.upper() == 'ALL':
                         destination_port = int(flow_log_record["destinationPort"])
                         sl_matched_records.append({
-                                    "Compartment_ID": data["Compartment_ID"],
-                                    "Subnet_ID": data['Subnet_ID'],
-                                    "Security_List_ID": data["Security_List_ID"],
-                                    "Port": destination_port,
-                                    "Port_range":'NA',
-                                    "reason": "Other port match"
-                                })
-                else:
-                    sl_unmatched_records.append({
-                        "Compartment_ID": data["Compartment_ID"],
-                        "Subnet_ID": data['Subnet_ID'],
-                        "Security_List_ID": data["Security_List_ID"],
-                        "Port": flow_log_record["destinationPort"],
-                        "Port_range":'NA',
-                        "mismatch_reason": f"Protocol mismatch: Flow Log Protocol {record_protocol} != Security Rule Protocol number {rule_protocol_number} and {Protocol_mapping.get(rule_protocol_number, 'Unknown')}"
-                    })
+                            "Compartment_ID": data["Compartment_ID"],
+                            "Subnet_ID": data['Subnet_ID'],
+                            "Security_List_ID": data["Security_List_ID"],
+                            "Flow Log Dest Port": destination_port,
+                            "Security_List_Port_range": 'ALL',
+                            "reason": "All Ports",
+                            "misc":""
+                        })
+                        validate_sec_list=True            
+                    elif(rule_protocol_number in Protocol_mapping and Protocol_mapping[rule_protocol_number] == record_protocol):
+
+                        # Check TCP Options
+                        if record_protocol == "TCP" and security_list_rule.tcp_options:
+                            destination_port = int(flow_log_record["destinationPort"])
+                            if security_list_rule.tcp_options.destination_port_range:
+                                port_range = security_list_rule.tcp_options.destination_port_range
+                                if port_range.min <= destination_port <= port_range.max:
+                                    sl_matched_records.append({
+                                        "Compartment_ID": data["Compartment_ID"],
+                                        "Subnet_ID": data['Subnet_ID'],
+                                        "Security_List_ID": data["Security_List_ID"],
+                                        "Flow Log Dest Port": destination_port,
+                                        "Security_List_Port_range": port_range,
+                                        "reason": "TCP port match",
+                                        "misc":f"Flow Log Record is {str(flow_log_record)} and Security List is {str(security_list_rule)})"
+                                    })
+                                    validate_sec_list=True 
+                        elif record_protocol == "UDP" and security_list_rule.udp_options:
+                            destination_port = int(flow_log_record["destinationPort"])
+                            if security_list_rule.udp_options.destination_port_range:
+                                port_range = security_list_rule.udp_options.destination_port_range
+                                if port_range.min <= destination_port <= port_range.max:
+                                    sl_matched_records.append({
+                                        "Compartment_ID": data["Compartment_ID"],
+                                        "Subnet_ID": data['Subnet_ID'],
+                                        "Security_List_ID": data["Security_List_ID"],
+                                        "Flow Log Dest Port": destination_port,
+                                        "Security_List_Port_range": port_range,
+                                        "reason": "UDP port match",
+                                        "misc":f"Flow Log Record is {str(flow_log_record)} and Security List is {str(security_list_rule)})"
+                                    })
+                                    validate_sec_list=True 
+                        else:
+                            destination_port = int(flow_log_record["destinationPort"])
+                            sl_matched_records.append({
+                                        "Compartment_ID": data["Compartment_ID"],
+                                        "Subnet_ID": data['Subnet_ID'],
+                                        "Security_List_ID": data["Security_List_ID"],
+                                        "Port": destination_port,
+                                        "Port_range": 'NA',
+                                        "reason": "Other port match",
+                                        "misc":f"Flow Log Record is {str(flow_log_record)} and Security List is {str(security_list_rule)})"
+                                    })
+                            validate_sec_list=True 
+                    else:
+                        sl_unmatched_records.append({
+                            "Compartment_ID": data["Compartment_ID"],
+                            "Subnet_ID": data['Subnet_ID'],
+                            "Security_List_ID": data["Security_List_ID"],
+                            "Port": flow_log_record["destinationPort"],
+                            "Port_range": 'NA',
+                            "mismatch_reason": f"Protocol mismatch: Flow Log Protocol {record_protocol} != Security Rule Protocol number {rule_protocol_number} and {Protocol_mapping.get(rule_protocol_number, 'Unknown')}",
+                            "misc":f"Flow Log Record is {str(flow_log_record)} and Security List is {str(security_list_rule)})"
+                        })
+                        validate_sec_list=True 
         else:
             print(f"{ip_address} is not part of CIDR {network}")
 
-    return sl_matched_records,sl_unmatched_records
+    return sl_matched_records, sl_unmatched_records
+
 
 def main(tenancy_id):
     # Prepare lists to store data
@@ -228,7 +259,7 @@ def main(tenancy_id):
         vcns = list_all_vcns(compartment_id)
         for vcn in vcns:
             print(f"Checking VCN:{vcn.id}")
-            subnets = list_all_subnets(compartment_id,vcn.id)
+            subnets = list_all_subnets(compartment_id, vcn.id)
             for subnet in subnets:
                 print(f"checking subnet:{subnet.id}")
                 flow_logs_enabled, log_group_id, log_group_name, log_id, log_name = check_flow_logs_enabled(compartment_id, subnet.id)
@@ -269,7 +300,7 @@ def main(tenancy_id):
 
     # Save unmatched records to Excel
     df_unmatched = pd.DataFrame(unmatched_records)
-    df_unmatched.to_excel(rf"C:\Security\Blogs\Security_List\Logs\4_raw_data_unmatched_records_{timestamp}.xlsx", index=False)
+    df_unmatched.to_excel(rf"C:\Security\Blogs\Security_List\Logs\raw_data_unmatched_records_{timestamp}.xlsx", index=False)
 
 if __name__ == "__main__":
     tenancy_id = config['tenancy']  # Get the tenancy ID from the config
