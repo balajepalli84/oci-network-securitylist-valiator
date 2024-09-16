@@ -1,7 +1,6 @@
 import json
 import oci
 import itertools
-import ipaddress
 
 # OCI configuration
 config = oci.config.from_file("~/.oci/config")  # Modify if your config file is located elsewhere
@@ -42,31 +41,38 @@ for obj in objects:
                         # Add the data to the dictionary
                         if vnicsubnetocid not in data_dict:
                             data_dict[vnicsubnetocid] = {
-                                'TCP_Internal': {'ports': set(), 'records': {}},
-                                'TCP_External': {'ports': set(), 'records': {}},
-                                'UDP_Internal': {'ports': set(), 'records': {}},
-                                'UDP_External': {'ports': set(), 'records': {}}
+                                'TCP_Internal': {'ports': set(), 'port_counts': {}, 'records': {}},
+                                'TCP_External': {'ports': set(), 'port_counts': {}, 'records': {}},
+                                'UDP_Internal': {'ports': set(), 'port_counts': {}, 'records': {}},
+                                'UDP_External': {'ports': set(), 'port_counts': {}, 'records': {}}
                             }
                         
                         # Create a unique key to count occurrences (source_address, destination_address, destination_port)
                         key = (source_address, destination_address, destination_port)
 
-                        # Add protocolName to the set (no duplicates)
+                        # Count per port
                         if internal_or_external_source == 'internal':
-                            data_dict[vnicsubnetocid][f'{protocol_name}_Internal']['ports'].add(destination_port)
-                            data_dict[vnicsubnetocid][f'{protocol_name}_Internal']['records'][key] = \
-                                data_dict[vnicsubnetocid][f'{protocol_name}_Internal']['records'].get(key, 0) + 1
+                            protocol_key = f'{protocol_name}_Internal'
                         else:
-                            data_dict[vnicsubnetocid][f'{protocol_name}_External']['ports'].add(destination_port)
-                            data_dict[vnicsubnetocid][f'{protocol_name}_External']['records'][key] = \
-                                data_dict[vnicsubnetocid][f'{protocol_name}_External']['records'].get(key, 0) + 1
+                            protocol_key = f'{protocol_name}_External'
+                        
+                        data_dict[vnicsubnetocid][protocol_key]['ports'].add(destination_port)
+                        data_dict[vnicsubnetocid][protocol_key]['port_counts'][destination_port] = \
+                            data_dict[vnicsubnetocid][protocol_key]['port_counts'].get(destination_port, 0) + 1
+
+                        # Count for (source, destination, port) combination
+                        data_dict[vnicsubnetocid][protocol_key]['records'][key] = \
+                            data_dict[vnicsubnetocid][protocol_key]['records'].get(key, 0) + 1
         except json.JSONDecodeError as e:
             print(f"Error decoding JSON file {obj.name}: {e}")
             continue
 
 # Create a new JSON file for each VNIC subnet OCID
 for vnicsubnetocid, data in data_dict.items():
-    output_data = {}
+    output_data = {
+        "vnicsubnetocid": vnicsubnetocid,  # Add vnicsubnetocid at the top
+        "protocols": {}
+    }
     
     for protocol in ['TCP_Internal', 'TCP_External', 'UDP_Internal', 'UDP_External']:
         ports = sorted(data[protocol]['ports'])
@@ -80,12 +86,23 @@ for vnicsubnetocid, data in data_dict.items():
             else:
                 ranges.append(str(group[0]))
         
-        # Add port ranges to the output
-        output_data[protocol] = {'port_ranges': ','.join(ranges), 'records': []}
+        # Sort port_counts based on count value in descending order
+        port_counts = sorted(
+            [{"port": port, "count": count} for port, count in data[protocol]['port_counts'].items()],
+            key=lambda x: x['count'], 
+            reverse=True
+        )
+
+        # Add port ranges and sorted port_counts to the output
+        output_data['protocols'][protocol] = {
+            'port_ranges': ','.join(ranges),
+            'port_counts': port_counts,
+            'detailed_records': []  # For the detailed section
+        }
         
         # Process each record for this protocol (source_address, destination_address, destination_port, count)
         for (source_address, destination_address, destination_port), count in data[protocol]['records'].items():
-            output_data[protocol]['records'].append({
+            output_data['protocols'][protocol]['detailed_records'].append({
                 'source_address': source_address,
                 'destination_address': destination_address,
                 'destination_port': destination_port,
